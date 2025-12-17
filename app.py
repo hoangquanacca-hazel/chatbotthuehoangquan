@@ -1,142 +1,151 @@
 import streamlit as st
 import google.generativeai as genai
 import os
+import time
 
-# --- 1. CẤU HÌNH TRANG WEB ---
-st.set_page_config(page_title="Trợ lý Luật Thuế VN (Gen Z)", page_icon="🇻🇳", layout="wide")
+# --- 1. CẤU HÌNH TRANG (GIAO DIỆN CHUYÊN NGHIỆP) ---
+st.set_page_config(
+    page_title="Hệ thống Chuyên gia Thuế AI",
+    page_icon="⚖️",
+    layout="centered", # Dùng centered cho giống chat app mobile
+    initial_sidebar_state="collapsed" # Ẩn sidebar cho gọn
+)
 
+# CSS để ẩn các thành phần thừa, làm đẹp giao diện
 st.markdown("""
 <style>
-    .stChatMessage {border-radius: 10px; padding: 10px; border: 1px solid #eee;}
-    .main-header {font-size: 24px; font-weight: bold; color: #d9534f;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stChatMessage {border-radius: 15px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
+    .main-header {text-align: center; font-size: 28px; font-weight: 800; color: #1E88E5; margin-bottom: 20px;}
+    .sub-header {text-align: center; font-size: 14px; color: #666; margin-bottom: 30px;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. CẤU HÌNH BÊN TRÁI ---
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/9502/9502602.png", width=80)
-    st.title("⚙️ Cài đặt")
-    
-    # Khởi tạo biến api_key
-    api_key = None
-    
-    # Kỹ thuật Try-Except: Thử tìm key, nếu lỗi thì bỏ qua
-    try:
-        if 'GOOGLE_API_KEY' in st.secrets:
-            api_key = st.secrets['GOOGLE_API_KEY']
-            st.success("✅ Đã kết nối API Key từ hệ thống.")
-    except FileNotFoundError:
-        # Lỗi này xảy ra khi chạy trên máy cá nhân mà chưa tạo file secrets.toml
-        pass 
-    except Exception:
-        pass
+# --- 2. HÀM HỆ THỐNG (CORE SYSTEM) ---
 
-    # Nếu không tìm thấy key trong hệ thống (do đang chạy trên máy tính), hiện ô nhập
-    if not api_key:
-        api_key = st.text_input("Nhập Google API Key:", type="password")
-        st.caption("Gợi ý: Nhập mã AIza... của bạn vào đây.")
+def get_api_key():
+    """Lấy API Key từ Secrets (Ưu tiên) hoặc File local"""
+    if "GOOGLE_API_KEY" in st.secrets:
+        return st.secrets["GOOGLE_API_KEY"]
+    return None
 
-# --- 3. HÀM XỬ LÝ ---
-def get_pdf_files(folder_path):
-    """Lấy danh sách file PDF trong thư mục"""
-    files = []
-    if os.path.exists(folder_path):
-        for f in os.listdir(folder_path):
-            if f.lower().endswith('.pdf'):
-                files.append(os.path.join(folder_path, f))
-    return files
+def get_local_pdf_files(folder_path="tailieu"):
+    """Quét thư mục tailieu"""
+    if not os.path.exists(folder_path):
+        return []
+    return [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
 
-def upload_local_files_to_gemini(file_paths):
-    """Upload file từ ổ cứng lên Google Gemini"""
-    file_refs = []
-    status_bar = st.status("Đang nạp dữ liệu luật...", expanded=True)
+# 🔥 CACHE RESOURCE: Trái tim của hệ thống
+# Hàm này chỉ chạy 1 lần duy nhất khi Server khởi động.
+# Nó upload file và giữ kết nối trong bộ nhớ RAM của Server.
+@st.cache_resource(show_spinner="Đang khởi tạo hệ tri thức Thuế (Lần đầu sẽ mất khoảng 1 phút)...")
+def initialize_knowledge_base(_api_key):
+    genai.configure(api_key=_api_key)
     
-    for path in file_paths:
+    # 1. Lấy file từ ổ cứng server (do GitHub đẩy sang)
+    local_files = get_local_pdf_files()
+    if not local_files:
+        return None, "Không tìm thấy tài liệu trong thư mục 'tailieu'."
+
+    # 2. Kiểm tra file trên Google (để tránh upload lại)
+    uploaded_refs = []
+    existing_files = {f.display_name: f for f in genai.list_files()}
+    
+    # Thanh tiến trình ẩn (chỉ hiện log trong console server)
+    print(f"Bắt đầu đồng bộ {len(local_files)} văn bản luật...")
+
+    for path in local_files:
         file_name = os.path.basename(path)
-        status_bar.write(f"📥 Đang đọc: {file_name}...")
-        try:
-            # Upload trực tiếp file từ đường dẫn
-            ref = genai.upload_file(path, mime_type="application/pdf")
-            file_refs.append(ref)
-        except Exception as e:
-            st.error(f"Lỗi file {file_name}: {e}")
-            
-    status_bar.update(label="✅ Đã nạp xong dữ liệu!", state="complete", expanded=False)
-    return file_refs
-
-# --- 4. LOGIC CHÍNH ---
-st.markdown('<p class="main-header">🏛️ Trợ lý Luật Thuế Việt Nam (Dữ liệu 2024-2025)</p>', unsafe_allow_html=True)
-
-# Tìm file trong thư mục 'tailieu'
-local_folder = "tailieu"
-pdf_files = get_pdf_files(local_folder)
-
-if not pdf_files:
-    st.error(f"⚠️ Không tìm thấy file PDF nào trong thư mục '{local_folder}'. Hãy copy file luật vào đó!")
-    st.stop()
-else:
-    with st.expander(f"📚 Đang sử dụng {len(pdf_files)} văn bản luật (Bấm để xem chi tiết)"):
-        for f in pdf_files:
-            st.write(f"- {os.path.basename(f)}")
-
-# Chỉ chạy khi có API Key
-if api_key:
-    try:
-        genai.configure(api_key=api_key)
         
-        # Kiểm tra session để không upload lại khi nhấn nút khác
-        if "chat_session" not in st.session_state:
-            
-            # Upload file lên Gemini
-            uploaded_refs = upload_local_files_to_gemini(pdf_files)
-            
-            # Cấu hình Prompt
-            system_instruction = """
-            Bạn là Chuyên gia Tư vấn Thuế (Tax Expert) dành cho người Việt Nam.
-            Dữ liệu: Hãy trả lời CHỈ dựa trên các tài liệu PDF được cung cấp.
-            Yêu cầu:
-            1. Trích dẫn điều luật cụ thể (Ví dụ: Theo Điều 5, Khoản 2 Luật Thuế GTGT...).
-            2. Nếu là Luật mới 2024/2025, hãy nhấn mạnh sự thay đổi so với luật cũ.
-            3. Trả lời ngắn gọn, súc tích, dễ hiểu.
-            """
-            
-            # Chọn Model xịn nhất của bạn
-            model = genai.GenerativeModel(
-                model_name="gemini-2.5-flash", # Đã cập nhật theo model của bạn
-                system_instruction=system_instruction
-            )
-            
-            # Tạo lịch sử chat ban đầu
-            history_content = ["Hãy ghi nhớ các tài liệu đính kèm này."]
-            history_content.extend(uploaded_refs)
-            
-            st.session_state.chat_session = model.start_chat(history=[
-                {"role": "user", "parts": history_content},
-                {"role": "model", "parts": "Đã tiếp nhận toàn bộ văn bản luật. Tôi sẵn sàng giải đáp."}
-            ])
-            st.session_state.chat_history = []
+        if file_name in existing_files:
+            # File đã có -> Dùng luôn
+            uploaded_refs.append(existing_files[file_name])
+            print(f"   [OK] Đã có: {file_name}")
+        else:
+            # File chưa có -> Upload
+            print(f"   [UP] Đang tải: {file_name}...")
+            try:
+                ref = genai.upload_file(path, mime_type="application/pdf")
+                # Chờ file xử lý xong
+                while ref.state.name == "PROCESSING":
+                    time.sleep(1)
+                    ref = genai.get_file(ref.name)
+                uploaded_refs.append(ref)
+                time.sleep(1) # Nghỉ nhẹ tránh spam
+            except Exception as e:
+                print(f"   [ERR] Lỗi file {file_name}: {e}")
 
-        # --- GIAO DIỆN CHAT ---
-        for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+    # 3. Khởi tạo Model với dữ liệu đã nạp
+    system_instruction = """
+    Bạn là Chuyên gia Thuế - Kế toán - Hải quan cấp cao tại Việt Nam (Tax Counsel).
+    Bạn đang sở hữu một kho dữ liệu pháp luật khổng lồ được đính kèm.
+    
+    NHIỆM VỤ:
+    - Giải đáp thắc mắc dựa trên các văn bản luật đã học.
+    - Phong cách: Chuyên nghiệp, Chính xác, Trích dẫn điều luật cụ thể.
+    - Nếu câu hỏi nằm ngoài phạm vi tài liệu, hãy dùng kiến thức chung nhưng cảnh báo người dùng.
+    """
+    
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash", # Dùng bản Flash cho nhanh và bộ nhớ lớn
+        system_instruction=system_instruction
+    )
+    
+    return model, uploaded_refs
 
-        if user_query := st.chat_input("Hỏi về thuế TNCN, GTGT, bán hàng Shopee..."):
-            st.session_state.chat_history.append({"role": "user", "content": user_query})
-            with st.chat_message("user"):
-                st.markdown(user_query)
-            
-            with st.chat_message("assistant"):
-                box = st.empty()
-                box.markdown("⏳ *Đang tra cứu...*")
-                try:
-                    response = st.session_state.chat_session.send_message(user_query)
-                    box.markdown(response.text)
-                    st.session_state.chat_history.append({"role": "assistant", "content": response.text})
-                except Exception as e:
-                    box.error(f"Lỗi: {e}")
+# --- 3. GIAO DIỆN CHÍNH (MAIN APP) ---
 
-    except Exception as e:
-        st.error(f"Lỗi kết nối API: {e}")
-else:
-    st.warning("⬅️ Vui lòng nhập API Key để bắt đầu.")
+# Tiêu đề
+st.markdown('<div class="main-header">🏛️ PHÒNG KHÁM THUẾ AI</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Hệ thống hỗ trợ pháp lý tự động dành cho SME & Hộ kinh doanh</div>', unsafe_allow_html=True)
+
+# Kiểm tra API Key
+api_key = get_api_key()
+if not api_key:
+    st.error("⚠️ Chưa cấu hình API Key. Vui lòng thêm vào Secrets.")
+    st.stop()
+
+# Khởi động não bộ (Chỉ chạy lần đầu, các lần sau lấy từ Cache -> Siêu nhanh)
+try:
+    model, knowledge_refs = initialize_knowledge_base(api_key)
+    
+    if isinstance(model, str): # Nếu trả về chuỗi nghĩa là có lỗi
+        st.warning(model)
+        st.stop()
+        
+    # Quản lý hội thoại
+    if "chat_session" not in st.session_state:
+        # Nạp lịch sử lần đầu gồm toàn bộ file luật
+        history_setup = [{"role": "user", "parts": knowledge_refs + ["Hãy ghi nhớ toàn bộ văn bản luật này để tư vấn."]},
+                         {"role": "model", "parts": "Tôi đã tiếp nhận toàn bộ cơ sở dữ liệu luật. Sẵn sàng phục vụ."}]
+        st.session_state.chat_session = model.start_chat(history=history_setup)
+        st.session_state.messages = [] # Chỉ hiển thị đoạn chat mới, ẩn đoạn nạp file đi
+
+except Exception as e:
+    st.error(f"Lỗi khởi động hệ thống: {e}")
+    st.stop()
+
+# Hiển thị hội thoại
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Ô nhập liệu (Nằm dưới cùng)
+if prompt := st.chat_input("Nhập câu hỏi của bạn (Ví dụ: Thuế khoán năm 2025 tính thế nào?)..."):
+    # Hiện câu hỏi
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Xử lý trả lời
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("⚡ *Đang tra cứu dữ liệu...*")
+        try:
+            response = st.session_state.chat_session.send_message(prompt)
+            message_placeholder.markdown(response.text)
+            st.session_state.messages.append({"role": "assistant", "content": response.text})
+        except Exception as e:
+            message_placeholder.error("Hệ thống đang quá tải, vui lòng thử lại sau giây lát.")

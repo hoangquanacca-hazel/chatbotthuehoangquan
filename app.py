@@ -63,7 +63,7 @@ def initialize_knowledge_base(_api_key):
     
     # Dùng bản 1.5 PRO để chứa hết 23 file
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-pro", 
+        model_name="gemini-2.5-pro", 
         safety_settings=safety_settings,
         system_instruction="Bạn là Chuyên gia Thuế. Trả lời dựa trên văn bản đính kèm."
     )
@@ -123,3 +123,4 @@ try:
 
 except Exception as e:
     st.error(f"Lỗi khởi động: {e}")
+
